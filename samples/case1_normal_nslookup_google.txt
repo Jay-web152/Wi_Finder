@@ -1,0 +1,7 @@
+서버:    ns.jnu.ac.kr
+Address:  168.131.33.5
+
+이름:    google.com
+Addresses:  2404:6800:4005:81b::200e
+	  142.250.199.206
+
