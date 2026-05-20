@@ -30,3 +30,4 @@ build/
 
 # Test output
 *.log
+.DS_Store
