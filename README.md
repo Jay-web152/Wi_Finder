@@ -22,3 +22,17 @@
 - GitHub
 - PyInstaller
 - 추후 FastAPI 또는 Flask
+
+샘플 기반 통합 테스트 실행 방법
+
+python3 app/test_samples.py
+
+이 테스트는 samples/ 폴더의 5개 case를 대상으로
+parser.py → diagnosis.py → display.py 흐름을 검증한다.
+
+기대 결과:
+case1_normal                → NORMAL
+case2_disconnected          → DISCONNECTED
+case3_1_connected_no_ip     → CONNECTED_NO_IP
+case3_2_dns_fail            → DNS_FAIL
+case3_3_external_ping_fail  → EXTERNAL_PING_FAIL
