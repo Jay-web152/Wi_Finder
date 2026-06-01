@@ -17,6 +17,10 @@ logs/
 local_results.json
 pending_results.json
 
+# Collector output
+collected/
+*.zip
+
 # Build files
 dist/
 build/
@@ -30,4 +34,3 @@ build/
 
 # Test output
 *.log
-.DS_Store
