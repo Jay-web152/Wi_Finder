@@ -71,6 +71,41 @@ def extract_first_ipv4(text):
     return match.group(1) if match else None
 
 
+def normalize_spaces(text):
+    """
+    여러 공백을 하나로 줄여 비교를 안정적으로 만든다.
+    """
+    return " ".join(str(text).strip().split())
+
+
+def is_invalid_loopback_or_placeholder_ip(ip):
+    """
+    DNS 응답 주소로 보기 어려운 IP인지 판단한다.
+
+    - 127.x.x.x: 루프백
+    - 169.254.x.x: APIPA
+    - 0.0.0.0: placeholder
+    """
+    if ip is None:
+        return True
+
+    ip = str(ip).strip()
+
+    if not ip:
+        return True
+
+    if ip == "0.0.0.0":
+        return True
+
+    if ip.startswith("127."):
+        return True
+
+    if ip.startswith("169.254."):
+        return True
+
+    return False
+
+
 # =========================
 # ipconfig Wi-Fi 섹션 추출
 # =========================
@@ -151,6 +186,9 @@ def parse_netsh_interfaces(text):
     - 인증 방식
     - 암호 방식
     - 프로필
+
+    수정 포인트:
+    - Windows 출력에서 BSSID가 'AP BSSID'로 나오는 경우도 처리한다.
     """
     result = {
         "wifi_connected": False,
@@ -173,6 +211,8 @@ def parse_netsh_interfaces(text):
     for line in lines:
         stripped = line.strip()
         lower = stripped.lower()
+        normalized = normalize_spaces(stripped)
+        normalized_lower = normalized.lower()
 
         # 상태: 연결됨 / 연결되지 않음
         if stripped.startswith("상태") or lower.startswith("state"):
@@ -185,14 +225,29 @@ def parse_netsh_interfaces(text):
                 result["wifi_connected"] = False
 
         # SSID
-        if stripped.startswith("SSID") and not stripped.startswith("BSSID"):
+        # 주의:
+        # AP BSSID 줄에 SSID가 포함되어 있으므로,
+        # BSSID/AP BSSID 줄은 SSID로 처리하지 않는다.
+        if (
+            stripped.startswith("SSID")
+            and not stripped.startswith("BSSID")
+            and not normalized_lower.startswith("ap bssid")
+        ):
             value = extract_value_after_colon(stripped)
             if value:
                 result["ssid"] = value
 
-        # BSSID
-        if stripped.startswith("BSSID"):
-            value = extract_value_after_colon(stripped)
+        # BSSID / AP BSSID
+        # 예:
+        # BSSID                   : 00:11:22:33:44:55
+        # AP BSSID                : 50:e4:e0:b8:98:f1
+        bssid_match = re.match(
+            r"^(?:AP\s+)?BSSID\s*:\s*(.+)$",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        if bssid_match:
+            value = bssid_match.group(1).strip()
             if value:
                 result["bssid"] = value
 
@@ -258,7 +313,7 @@ def parse_netsh_interfaces(text):
         bssid_index = None
 
         for i, line in enumerate(lines):
-            if "BSSID" in line:
+            if re.search(r"(?:AP\s+)?BSSID", line, flags=re.IGNORECASE):
                 bssid_index = i
                 break
 
@@ -566,6 +621,12 @@ def parse_ping(text):
     if "일반 오류" in text or "general failure" in lower_text:
         result["general_failure"] = True
 
+    # timeout 문구
+    if "시간이 초과" in text or "timed out" in lower_text:
+        # timeout 자체만으로 success를 결정하지는 않고,
+        # 아래 packet loss가 있으면 packet loss 기준으로 판단한다.
+        pass
+
     # 예: Ping google.com [142.250.207.110] 32바이트 데이터 사용
     resolved_match = re.search(r"\[(\d{1,3}(?:\.\d{1,3}){3})\]", text)
     if resolved_match:
@@ -611,49 +672,113 @@ def parse_nslookup(text):
     nslookup google.com 결과 파싱.
 
     핵심:
+    - DNS 서버 이름
     - DNS 서버 주소
     - google.com 주소가 반환되었는지
+
+    수정 포인트:
+    - 기존 방식은 Address 줄의 IP를 모두 resolved_addresses에 넣었다.
+    - 그러면 DNS 서버 주소만 있어도 google.com 응답 주소처럼 오판할 수 있다.
+    - 이제 Server/서버 바로 다음의 Address는 dns_server_address로 분리하고,
+      Name/이름 이후에 나오는 Address만 resolved_addresses로 본다.
     """
     result = {
         "success": False,
         "dns_server": None,
+        "dns_server_address": None,
         "resolved_addresses": [],
     }
 
     lines = text.splitlines()
     lower_text = text.lower()
 
+    in_answer_section = False
+    last_key_was_server = False
+
     for line in lines:
         stripped = line.strip()
         lower = stripped.lower()
+
+        if not stripped:
+            continue
 
         # Server: 또는 서버:
         if lower.startswith("server") or stripped.startswith("서버"):
             value = extract_value_after_colon(stripped)
             if value:
                 result["dns_server"] = value
+            last_key_was_server = True
+            continue
 
-        # Address: 또는 Addresses:
+        # Name: 또는 이름:
+        # 이 이후의 Address / Addresses는 실제 조회 대상 응답으로 판단한다.
+        if lower.startswith("name") or stripped.startswith("이름"):
+            in_answer_section = True
+            last_key_was_server = False
+            continue
+
+        # Non-authoritative answer 문구 이후에도 응답 영역으로 판단
+        if "non-authoritative answer" in lower or "권한 없는 응답" in stripped:
+            in_answer_section = True
+            last_key_was_server = False
+            continue
+
         ip_matches = re.findall(r"(\d{1,3}(?:\.\d{1,3}){3})", stripped)
 
-        for ip in ip_matches:
-            result["resolved_addresses"].append(ip)
+        if not ip_matches:
+            last_key_was_server = False
+            continue
+
+        # Server/서버 바로 다음 Address는 DNS 서버 주소로 본다.
+        # 예:
+        # 서버:    kns.kornet.net
+        # Address: 168.126.63.1
+        if last_key_was_server and (
+            lower.startswith("address")
+            or lower.startswith("addresses")
+            or stripped.startswith("주소")
+        ):
+            result["dns_server_address"] = ip_matches[0]
+            last_key_was_server = False
+            continue
+
+        # Name/이름 이후의 Address는 google.com 조회 결과로 본다.
+        if in_answer_section:
+            for ip in ip_matches:
+                result["resolved_addresses"].append(ip)
+
+        last_key_was_server = False
 
     result["resolved_addresses"] = list(dict.fromkeys(result["resolved_addresses"]))
 
-    # DNS 서버 자체 주소만 있는 경우를 성공으로 보지 않기 위해 127.0.0.1 제외
     meaningful_addresses = [
         ip for ip in result["resolved_addresses"]
-        if ip != "127.0.0.1"
+        if not is_invalid_loopback_or_placeholder_ip(ip)
     ]
 
-    # google.com이 결과에 있고 의미 있는 IP가 있으면 성공
+    # 성공 판단:
+    # - google 관련 조회 결과이고
+    # - 의미 있는 응답 IP가 하나 이상 있어야 성공
     if "google" in lower_text and len(meaningful_addresses) > 0:
         result["success"] = True
 
     # 실패 문구 보정
-    if "can't find" in lower_text or "non-existent domain" in lower_text:
-        result["success"] = False
+    failure_patterns = [
+        "can't find",
+        "cannot find",
+        "could not find",
+        "non-existent domain",
+        "dns request timed out",
+        "request timed out",
+        "timeout",
+        "시간이 초과",
+        "찾을 수 없습니다",
+    ]
+
+    if any(pattern in lower_text for pattern in failure_patterns):
+        # 실패 문구가 있고 실제 응답 주소가 없으면 실패
+        if len(meaningful_addresses) == 0:
+            result["success"] = False
 
     return result
 
