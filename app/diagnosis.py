@@ -12,6 +12,11 @@ Wi-Fi 접속 상태를 사람이 이해하기 쉬운 진단 결과로 변환한�
 - DNS_FAIL
 - EXTERNAL_PING_FAIL
 - UNKNOWN
+
+2026 수정 내용:
+- nslookup만 실패한 정상 연결 상태를 DNS_FAIL로 오진하지 않도록 수정
+- ping google.com이 성공하면 사용자 관점에서 도메인 통신은 정상으로 판단
+- 127.0.0.1뿐만 아니라 127.0.0.0/8 전체를 비정상 DNS로 판단
 """
 
 from __future__ import annotations
@@ -104,13 +109,51 @@ def _is_success(section: Dict[str, Any]) -> bool:
     return bool(section.get("success", False))
 
 
+# =========================
+# DNS 관련 판단 함수
+# =========================
+
+def _is_invalid_dns_ip(ip: Any) -> bool:
+    """
+    DNS 서버 IP 또는 nslookup 결과 IP가 비정상 값인지 판단한다.
+
+    비정상으로 보는 값:
+    - 빈 값
+    - 0.0.0.0
+    - 127.0.0.0/8 루프백 주소
+    - 169.254.0.0/16 APIPA 주소
+    - ::1 IPv6 루프백
+    """
+    if ip is None:
+        return True
+
+    ip = str(ip).strip()
+
+    if not ip:
+        return True
+
+    if ip == "0.0.0.0":
+        return True
+
+    if ip == "::1":
+        return True
+
+    if ip.startswith("127."):
+        return True
+
+    if ip.startswith("169.254."):
+        return True
+
+    return False
+
+
 def _has_valid_dns_server(dns_servers: Any) -> bool:
     """
-    DNS 서버가 있는지 판단한다.
+    DNS 서버가 정상적으로 설정되어 있는지 판단한다.
 
-    parser.py 기준:
-    - dns_servers: list[str]
-    - 127.0.0.1만 있는 경우는 정상 DNS로 보기 어렵다.
+    기존에는 127.0.0.1만 제외했지만,
+    실제 테스트에서 127.0.0.2 같은 루프백 DNS도 확인되었으므로
+    127.0.0.0/8 전체를 비정상 DNS로 판단한다.
     """
     if not dns_servers:
         return False
@@ -120,7 +163,7 @@ def _has_valid_dns_server(dns_servers: Any) -> bool:
 
     valid_servers = [
         server for server in dns_servers
-        if server and server != "127.0.0.1"
+        if not _is_invalid_dns_ip(server)
     ]
 
     return len(valid_servers) > 0
@@ -130,7 +173,8 @@ def _has_valid_resolved_addresses(addresses: Any) -> bool:
     """
     nslookup 결과 주소가 정상적인지 판단한다.
 
-    127.0.0.1만 있는 경우는 정상 DNS 조회 성공으로 보지 않는다.
+    127.0.0.1만 제외하지 않고,
+    127.x.x.x 전체, 169.254.x.x, 0.0.0.0 등을 비정상으로 본다.
     """
     if not addresses:
         return False
@@ -140,7 +184,7 @@ def _has_valid_resolved_addresses(addresses: Any) -> bool:
 
     valid_addresses = [
         address for address in addresses
-        if address and address != "127.0.0.1"
+        if not _is_invalid_dns_ip(address)
     ]
 
     return len(valid_addresses) > 0
@@ -181,6 +225,8 @@ def _build_indicators(parsed: Dict[str, Any]) -> Dict[str, Any]:
         nslookup.get("resolved_addresses", [])
     )
 
+    domain_resolution_works = ping_google_success or dns_lookup_valid
+
     eduroam_detected = _get_bool(bssid_info, "eduroam_detected")
     eduroam_bssid_count = _get_int(bssid_info, "eduroam_bssid_count", 0)
     strongest_eduroam_signal = _get_int(
@@ -215,6 +261,7 @@ def _build_indicators(parsed: Dict[str, Any]) -> Dict[str, Any]:
             "has_valid_dns_server": _has_valid_dns_server(dns_servers),
             "nslookup_success": nslookup_success,
             "dns_lookup_valid": dns_lookup_valid,
+            "domain_resolution_works": domain_resolution_works,
         },
         "internet": {
             "ping_8_8_8_8_success": ping_8_success,
@@ -277,9 +324,14 @@ def diagnose(parsed: Dict[str, Any]) -> Dict[str, Any]:
 
     1. Wi-Fi 미연결
     2. IP 없음 또는 APIPA
-    3. IP 있음 + 8.8.8.8 ping 성공 + DNS 실패
-    4. DNS 성공 + 외부 ping 실패
+    3. IP 있음 + 8.8.8.8 ping 성공 + 도메인 통신 실패
+    4. 도메인 확인 가능 + 외부 ping 실패
     5. 정상
+    6. 알 수 없는 상태
+
+    DNS 오진 방지 핵심:
+    - ping google.com이 성공했다면 도메인 주소 변환이 실제로 된 것이다.
+    - 따라서 nslookup만 실패했다고 DNS_FAIL로 판단하지 않는다.
     """
 
     netsh = _get_section(parsed, "netsh_interfaces")
@@ -315,6 +367,10 @@ def diagnose(parsed: Dict[str, Any]) -> Dict[str, Any]:
     )
 
     has_valid_dns_server = _has_valid_dns_server(dns_servers)
+
+    # ping google.com이 성공하면 도메인 통신은 된 것으로 판단한다.
+    # nslookup이 실패해도 ping google.com이 성공하면 DNS_FAIL로 보내지 않는다.
+    domain_resolution_works = ping_google_success or nslookup_valid
 
     # =========================
     # 1. Wi-Fi 미연결
@@ -394,17 +450,25 @@ def diagnose(parsed: Dict[str, Any]) -> Dict[str, Any]:
     # 조건:
     # - Wi-Fi 연결됨
     # - IP 정상
+    # - APIPA 아님
     # - 게이트웨이 있음
     # - 8.8.8.8 ping 성공
-    # - google.com ping 실패 또는 nslookup 실패
+    # - google.com ping 실패
+    # - nslookup 실패 또는 DNS 서버 값 비정상
+    #
+    # 중요:
+    # - ping google.com이 성공하면 DNS_FAIL로 보지 않는다.
+    # - nslookup만 실패하는 경우는 NORMAL 또는 UNKNOWN 쪽으로 보내 오진을 줄인다.
     # =========================
     dns_failed = (
-        ping_8_success
+        wifi_connected
         and has_ipv4
+        and not is_apipa
         and has_gateway
+        and ping_8_success
+        and not ping_google_success
         and (
-            not ping_google_success
-            or not nslookup_valid
+            not nslookup_valid
             or not has_valid_dns_server
         )
     )
@@ -419,7 +483,7 @@ def diagnose(parsed: Dict[str, Any]) -> Dict[str, Any]:
                 "DNS 서버 설정 또는 DNS 응답 문제일 가능성이 큽니다."
             ),
             possible_causes=[
-                "DNS 서버가 127.0.0.1 등 비정상 값으로 설정됨",
+                "DNS 서버가 127.x.x.x 등 비정상 값으로 설정됨",
                 "DNS 서버 응답 실패",
                 "학교 내부 DNS 또는 통신사 DNS 문제",
                 "보안 프로그램 또는 VPN이 DNS 요청을 가로챔",
@@ -441,13 +505,20 @@ def diagnose(parsed: Dict[str, Any]) -> Dict[str, Any]:
     # 조건:
     # - Wi-Fi 연결됨
     # - IP 정상
-    # - DNS 조회 정상
+    # - APIPA 아님
+    # - 게이트웨이 있음
+    # - 도메인 확인은 가능함
     # - 8.8.8.8 ping 실패
+    #
+    # 기존에는 nslookup_valid만 봤지만,
+    # 이제는 ping google.com 성공도 도메인 확인 가능 상태로 인정한다.
     # =========================
     external_ping_failed = (
-        has_ipv4
+        wifi_connected
+        and has_ipv4
+        and not is_apipa
         and has_gateway
-        and nslookup_valid
+        and domain_resolution_works
         and not ping_8_success
     )
 
@@ -482,10 +553,16 @@ def diagnose(parsed: Dict[str, Any]) -> Dict[str, Any]:
     # 5. 정상
     # 조건:
     # - Wi-Fi 연결됨
+    # - SSID 있음
     # - IP 정상
+    # - APIPA 아님
     # - 게이트웨이 있음
-    # - DNS 정상
-    # - ping 성공
+    # - DNS 서버 정상
+    # - 8.8.8.8 ping 성공
+    # - ping google.com 성공 또는 nslookup 성공
+    #
+    # 핵심:
+    # - nslookup이 실패해도 ping google.com이 성공하면 정상으로 본다.
     # =========================
     normal = (
         wifi_connected
@@ -494,18 +571,32 @@ def diagnose(parsed: Dict[str, Any]) -> Dict[str, Any]:
         and not is_apipa
         and has_gateway
         and has_valid_dns_server
-        and nslookup_valid
         and ping_8_success
-        and ping_google_success
+        and domain_resolution_works
     )
 
     if normal:
+        normal_detail = detail
+
+        if ping_google_success and not nslookup_valid:
+            normal_detail = {
+                **detail,
+                "diagnosis_note": {
+                    "type": "DNS_CHECK_WARNING",
+                    "message": (
+                        "ping google.com은 성공했지만 nslookup은 실패했습니다. "
+                        "사용자 관점의 도메인 통신은 가능하므로 전체 진단은 정상으로 판단합니다. "
+                        "다만 DNS 서버 선택, VPN, 보안 프로그램, DNS 캐시 영향은 추가 확인할 수 있습니다."
+                    ),
+                },
+            }
+
         return DiagnosisResult(
             code=NORMAL,
             level="success",
             title="Wi-Fi 연결 정상",
             summary=(
-                "eduroam 연결, IP 할당, DNS 조회, 외부 통신이 모두 정상으로 확인되었습니다."
+                "eduroam 연결, IP 할당, 도메인 기반 통신, 외부 통신이 정상으로 확인되었습니다."
             ),
             possible_causes=[],
             recommended_actions=[
@@ -513,7 +604,7 @@ def diagnose(parsed: Dict[str, Any]) -> Dict[str, Any]:
                 "문제가 특정 웹사이트에서만 발생한다면 해당 사이트 또는 브라우저 문제일 수 있습니다.",
             ],
             indicators=indicators,
-            detail=detail,
+            detail=normal_detail,
         ).to_dict()
 
     # =========================
@@ -566,6 +657,13 @@ def build_display_summary(diagnosis: Dict[str, Any]) -> Dict[str, Any]:
 
     code = diagnosis.get("code", UNKNOWN)
 
+    domain_resolution_works = dns.get("domain_resolution_works")
+    if domain_resolution_works is None:
+        domain_resolution_works = (
+            dns.get("dns_lookup_valid")
+            or internet.get("ping_google_success")
+        )
+
     return {
         "status_code": code,
         "level": diagnosis.get("level"),
@@ -613,12 +711,12 @@ def build_display_summary(diagnosis: Dict[str, Any]) -> Dict[str, Any]:
                 "name": "웹사이트 주소 확인",
                 "value": (
                     "정상"
-                    if dns.get("dns_lookup_valid")
+                    if domain_resolution_works
                     else "실패"
                 ),
                 "status": (
                     "success"
-                    if dns.get("dns_lookup_valid")
+                    if domain_resolution_works
                     else "error"
                 ),
             },
@@ -756,8 +854,7 @@ if __name__ == "__main__":
     """
     이 파일을 단독 실행하면 간단한 샘플 dict로 동작을 확인한다.
 
-    실제 samples 폴더 전체 테스트는 나중에 test_diagnosis.py
-    또는 별도 테스트 스크립트에서 parser.py와 연결해서 실행하면 된다.
+    실제 samples 폴더 전체 테스트는 app/test_samples.py에서 실행하면 된다.
     """
 
     sample_parsed = {
@@ -807,12 +904,9 @@ if __name__ == "__main__":
             "resolved_ip": "142.251.119.113",
         },
         "nslookup_google": {
-            "success": True,
-            "dns_server": "kns.kornet.net",
-            "resolved_addresses": [
-                "142.251.118.102",
-                "142.251.118.101",
-            ],
+            "success": False,
+            "dns_server": "UnKnown",
+            "resolved_addresses": [],
         },
     }
 
