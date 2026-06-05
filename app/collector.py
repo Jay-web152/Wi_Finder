@@ -6,16 +6,16 @@ Windows 환경에서 네트워크 진단에 필요한 명령어를 실행하고,
 그 원문 결과를 dict 형태로 수집한다.
 
 수집 흐름:
-collector.py
-→ parser.py
-→ diagnosis.py
-→ display.py
-→ gui.py
+collector.py → parser.py → diagnosis.py → display.py → gui.py
 
 주의:
 - 이 파일은 Windows에서 실행하는 것을 기본으로 한다.
 - macOS/Linux에서는 netsh, ipconfig /all 결과가 Windows와 다르므로
   실제 Wi-Fi 진단용으로는 사용할 수 없다.
+
+2026 수정 내용:
+- ping 명령어에 -n 4 -w 1000 옵션을 추가해 진단 시간을 단축했다.
+- 명령어별 timeout을 분리해 Wi-Fi 미연결 상태에서도 오래 기다리지 않도록 개선했다.
 """
 
 from __future__ import annotations
@@ -52,15 +52,37 @@ COMMANDS = {
     "ping_8_8_8_8": [
         "ping",
         "8.8.8.8",
+        "-n",
+        "4",
+        "-w",
+        "1000",
     ],
     "ping_google": [
         "ping",
         "google.com",
+        "-n",
+        "4",
+        "-w",
+        "1000",
     ],
     "nslookup_google": [
         "nslookup",
         "google.com",
     ],
+}
+
+
+# =========================
+# 명령어별 timeout
+# =========================
+
+COMMAND_TIMEOUTS = {
+    "netsh_interfaces": 10,
+    "netsh_networks_bssid": 15,
+    "ipconfig_all": 10,
+    "ping_8_8_8_8": 8,
+    "ping_google": 8,
+    "nslookup_google": 10,
 }
 
 
@@ -82,7 +104,6 @@ def _decode_output(data: bytes) -> str:
     Windows 한글 환경에서는 cp949가 자주 사용되지만,
     환경에 따라 utf-8, utf-16 등이 섞일 수 있으므로 여러 인코딩을 시도한다.
     """
-
     if not data:
         return ""
 
@@ -133,7 +154,6 @@ def run_command(
         "command": "netsh wlan show interfaces"
     }
     """
-
     command_text = " ".join(command)
 
     try:
@@ -154,6 +174,7 @@ def run_command(
             "stdout": stdout,
             "stderr": stderr,
             "command": command_text,
+            "timeout": timeout,
         }
 
     except FileNotFoundError:
@@ -163,6 +184,7 @@ def run_command(
             "stdout": "",
             "stderr": f"명령어를 찾을 수 없습니다: {command[0]}",
             "command": command_text,
+            "timeout": timeout,
         }
 
     except subprocess.TimeoutExpired:
@@ -172,6 +194,7 @@ def run_command(
             "stdout": "",
             "stderr": f"명령어 실행 시간이 초과되었습니다: {command_text}",
             "command": command_text,
+            "timeout": timeout,
         }
 
     except Exception as e:
@@ -181,7 +204,16 @@ def run_command(
             "stdout": "",
             "stderr": f"{type(e).__name__}: {e}",
             "command": command_text,
+            "timeout": timeout,
         }
+
+
+def _get_command_timeout(key: str, default_timeout: int) -> int:
+    """
+    명령어별 timeout 값을 반환한다.
+    별도 설정이 없으면 기본 timeout을 사용한다.
+    """
+    return COMMAND_TIMEOUTS.get(key, default_timeout)
 
 
 # =========================
@@ -208,7 +240,6 @@ def collect_raw_outputs(
 
     require_windows=True이면 Windows가 아닌 환경에서 실행을 막는다.
     """
-
     if require_windows and not is_windows():
         raise RuntimeError(
             "collector.py는 Windows 명령어 netsh, ipconfig를 사용하므로 "
@@ -218,7 +249,8 @@ def collect_raw_outputs(
     raw_outputs: Dict[str, str] = {}
 
     for key, command in COMMANDS.items():
-        result = run_command(command, timeout=timeout)
+        command_timeout = _get_command_timeout(key, timeout)
+        result = run_command(command, timeout=command_timeout)
 
         stdout = str(result.get("stdout", ""))
         stderr = str(result.get("stderr", ""))
@@ -239,10 +271,8 @@ def collect_with_metadata(
 ) -> Dict[str, object]:
     """
     수집 원문과 실행 메타데이터를 함께 반환한다.
-
     GUI 또는 로그 저장용으로 사용할 수 있다.
     """
-
     if require_windows and not is_windows():
         raise RuntimeError(
             "collector.py는 Windows 명령어 netsh, ipconfig를 사용하므로 "
@@ -255,7 +285,8 @@ def collect_with_metadata(
     started_at = datetime.now().isoformat(timespec="seconds")
 
     for key, command in COMMANDS.items():
-        result = run_command(command, timeout=timeout)
+        command_timeout = _get_command_timeout(key, timeout)
+        result = run_command(command, timeout=command_timeout)
 
         command_results[key] = result
 
@@ -299,7 +330,6 @@ def save_raw_outputs(
     ping_google.txt
     nslookup_google.txt
     """
-
     if output_dir is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_dir = Path("collected") / f"run_{timestamp}"
@@ -323,7 +353,6 @@ def collect_and_save(
     """
     명령어를 실행하고 결과를 txt 파일로 저장한다.
     """
-
     raw_outputs = collect_raw_outputs(
         require_windows=require_windows,
         timeout=timeout,
@@ -346,10 +375,7 @@ def collect_parse_diagnose_display(
     """
     실제 프로그램에서 사용할 수 있는 전체 흐름.
 
-    collector.py
-    → parser.py
-    → diagnosis.py
-    → display.py
+    collector.py → parser.py → diagnosis.py → display.py
 
     반환값:
     {
@@ -359,7 +385,6 @@ def collect_parse_diagnose_display(
         "display": ...
     }
     """
-
     from parser import parse_collected_outputs
     from diagnosis import diagnose
     from display import build_display_data
@@ -389,7 +414,6 @@ def print_collect_summary(metadata: Dict[str, object]) -> None:
     """
     collect_with_metadata() 결과를 콘솔에 보기 좋게 출력한다.
     """
-
     print("=" * 80)
     print("Wi_Finder collector.py 실행 결과")
     print("=" * 80)
@@ -411,12 +435,14 @@ def print_collect_summary(metadata: Dict[str, object]) -> None:
         success = result.get("success")
         returncode = result.get("returncode")
         command = result.get("command")
+        timeout = result.get("timeout")
         stdout = str(result.get("stdout", ""))
         stderr = str(result.get("stderr", ""))
 
         print("-" * 80)
         print(f"[{key}]")
         print(f"command   : {command}")
+        print(f"timeout   : {timeout}")
         print(f"success   : {success}")
         print(f"returncode: {returncode}")
 
@@ -456,7 +482,6 @@ if __name__ == "__main__":
     2. 결과 미리보기 출력
     3. collected/run_YYYYMMDD_HHMMSS/ 폴더에 txt 저장
     """
-
     try:
         metadata = collect_with_metadata(require_windows=True)
         print_collect_summary(metadata)
