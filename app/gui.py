@@ -13,6 +13,10 @@ Wi_Finder 사용자용 브라우저 GUI
 주의:
 - 실제 진단은 Windows에서만 정상 실행된다.
 - macOS에서는 /run 실행 시 Windows 명령어 사용 불가 오류가 뜨는 것이 정상이다.
+
+수정 내용:
+- 카드 데이터의 help_text를 details/summary 토글로 표시
+- 기본 description은 기존처럼 항상 표시
 """
 
 from __future__ import annotations
@@ -285,6 +289,7 @@ section h3 {
 .card.yellow { border-left-color: #f59e0b; }
 .card.orange { border-left-color: #f97316; }
 .card.gray { border-left-color: #94a3b8; }
+.card.blue { border-left-color: #2563eb; }
 .card-head {
   display: flex;
   align-items: center;
@@ -308,6 +313,25 @@ section h3 {
   margin-top: 10px;
   line-height: 1.45;
   font-size: 14px;
+}
+.metric-help {
+  margin-top: 9px;
+  font-size: 13px;
+  color: #4b5563;
+}
+.metric-help summary {
+  cursor: pointer;
+  font-weight: 900;
+  color: #2563eb;
+  user-select: none;
+}
+.metric-help summary:hover {
+  text-decoration: underline;
+}
+.metric-help p {
+  margin: 8px 0 0;
+  line-height: 1.55;
+  color: #374151;
 }
 .two-col {
   display: grid;
@@ -465,7 +489,21 @@ def render_card(card: Dict[str, Any]) -> str:
     status_label = card.get("status_label") or card.get("status") or ""
     icon = card.get("icon") or ""
     desc = card.get("description") or ""
+    help_text = card.get("help_text") or ""
     color = card.get("color") or "gray"
+
+    desc_html = ""
+    if desc:
+        desc_html = f'<div class="card-desc">{e(desc)}</div>'
+
+    help_html = ""
+    if help_text:
+        help_html = f"""
+        <details class="metric-help">
+          <summary>자세히 보기</summary>
+          <p>{e(help_text)}</p>
+        </details>
+        """
 
     return f"""
     <div class="card {e(color)}">
@@ -475,7 +513,8 @@ def render_card(card: Dict[str, Any]) -> str:
       </div>
       <div class="card-value">{e(value)}</div>
       <div class="status-label">{e(status_label)}</div>
-      <div class="card-desc">{e(desc)}</div>
+      {desc_html}
+      {help_html}
     </div>
     """
 
@@ -718,7 +757,7 @@ def render_page(content: str, page_title: str = "Wi_Finder") -> str:
   <header>
     <div>
       <h1>Wi_Finder</h1>
-      <p>사용자 단말 기반 Wi‑Fi 접속 장애 진단</p>
+      <p>사용자 단말 기반 Wi-Fi 접속 장애 진단</p>
     </div>
     <nav>
       <a href="/">진단 홈</a>
@@ -772,7 +811,6 @@ class WiFinderHandler(BaseHTTPRequestHandler):
             self.send_html(page)
 
         except Exception as exc:
-            # 오류 페이지 렌더링 자체에서 문제가 생겼을 때를 대비한 최후 안전장치
             fallback = (
                 "<!doctype html><html><head><meta charset='utf-8'>"
                 "<title>Wi_Finder 오류</title></head><body>"

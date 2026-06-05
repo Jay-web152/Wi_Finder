@@ -13,6 +13,10 @@ diagnosis.py의 진단 결과를 GUI에서 사용하기 쉬운 형태로 변환�
 주의:
 이 파일은 실제 GUI를 그리지 않는다.
 GUI에서 사용할 "표시용 데이터"만 만든다.
+
+수정 내용:
+- description은 기존처럼 짧은 기본 설명으로 유지
+- help_text를 추가해 GUI에서 토글 형태로 자세한 설명을 표시할 수 있도록 함
 """
 
 from __future__ import annotations
@@ -156,6 +160,7 @@ def _card(
     value: Any,
     status: str,
     description: str = "",
+    help_text: str = "",
 ) -> Dict[str, Any]:
     meta = _status_meta(status)
 
@@ -167,6 +172,7 @@ def _card(
         "icon": meta["icon"],
         "color": meta["color"],
         "description": description,
+        "help_text": help_text,
     }
 
 
@@ -234,6 +240,15 @@ def _ip_status(ip: Dict[str, Any]) -> str:
 
 
 def _dns_status(dns: Dict[str, Any]) -> str:
+    """
+    DNS 상태 표시.
+
+    diagnosis.py에서 domain_resolution_works를 넘겨주는 경우,
+    ping google.com 성공도 도메인 통신 가능 상태로 인정한다.
+    """
+    if dns.get("domain_resolution_works"):
+        return "success"
+
     if dns.get("dns_lookup_valid"):
         return "success"
 
@@ -303,6 +318,9 @@ def _ip_status_text(ip: Dict[str, Any]) -> str:
 
 
 def _dns_status_text(dns: Dict[str, Any]) -> str:
+    if dns.get("domain_resolution_works"):
+        return "정상"
+
     if dns.get("dns_lookup_valid"):
         return "정상"
 
@@ -408,36 +426,62 @@ def build_main_cards(diagnosis_result: Dict[str, Any]) -> List[Dict[str, Any]]:
             value="연결됨" if wifi.get("connected") else "연결 안 됨",
             status=_wifi_status(wifi),
             description="현재 단말이 Wi-Fi에 연결되어 있는지 확인합니다.",
+            help_text=(
+                "Wi-Fi가 연결되어 있지 않으면 IP, DNS, 인터넷 통신 테스트가 모두 실패할 수 있습니다. "
+                "이 경우 먼저 Windows Wi-Fi 목록에서 eduroam 또는 사용할 네트워크에 연결해야 합니다."
+            ),
         ),
         _card(
             name="연결된 Wi-Fi",
             value=wifi.get("ssid") or "-",
             status=_ssid_status(wifi),
             description="현재 연결된 SSID가 eduroam인지 확인합니다.",
+            help_text=(
+                "SSID는 Wi-Fi 이름입니다. 학교 무선망 진단에서는 eduroam에 연결되어 있는지가 중요합니다. "
+                "다른 Wi-Fi에 연결된 경우 학교 eduroam 문제와는 다른 결과가 나올 수 있습니다."
+            ),
         ),
         _card(
             name="신호 세기",
             value=_format_percent(wifi.get("signal_percent")),
             status=_signal_status(wifi.get("signal_percent")),
             description="무선 AP와 단말 사이의 신호 품질입니다.",
+            help_text=(
+                "신호 세기는 노트북과 Wi-Fi 장비 사이의 무선 신호 강도를 의미합니다. "
+                "70% 이상이면 대체로 양호하고, 40% 미만이면 연결 끊김이나 속도 저하가 발생할 수 있습니다."
+            ),
         ),
         _card(
             name="IP 주소 상태",
             value=_ip_status_text(ip),
             status=_ip_status(ip),
             description="IPv4 주소와 게이트웨이를 정상적으로 받았는지 확인합니다.",
+            help_text=(
+                "Wi-Fi에 연결되어도 IP 주소를 받지 못하면 인터넷을 사용할 수 없습니다. "
+                "169.254.x.x 형태의 APIPA 주소가 나오면 DHCP를 통한 정상 IP 할당에 실패한 상태일 수 있습니다."
+            ),
         ),
         _card(
             name="인터넷 연결",
             value=_internet_status_text(internet),
             status=_internet_status(internet),
             description="8.8.8.8 및 google.com ping 결과를 기반으로 판단합니다.",
+            help_text=(
+                "8.8.8.8 ping은 외부 IP와 직접 통신이 되는지 확인하고, "
+                "google.com ping은 도메인 주소를 사용한 통신이 되는지 확인합니다. "
+                "둘 중 어떤 항목이 실패하는지에 따라 DNS 문제인지 외부 통신 문제인지 구분할 수 있습니다."
+            ),
         ),
         _card(
             name="웹사이트 주소 확인",
             value=_dns_status_text(dns),
             status=_dns_status(dns),
             description="google.com 주소를 IP로 변환할 수 있는지 확인합니다.",
+            help_text=(
+                "DNS는 google.com 같은 주소를 실제 IP 주소로 바꿔주는 기능입니다. "
+                "DNS가 실패하면 IP 통신은 가능해도 웹사이트 주소로 접속이 안 될 수 있습니다. "
+                "단, ping google.com이 성공했다면 사용자 관점의 도메인 통신은 가능한 것으로 볼 수 있습니다."
+            ),
         ),
     ]
 
@@ -474,30 +518,53 @@ def build_sub_cards(diagnosis_result: Dict[str, Any]) -> List[Dict[str, Any]]:
             value=_format_ms(latency),
             status=_latency_status(latency),
             description="ping 평균 응답 시간입니다.",
+            help_text=(
+                "인터넷 응답이 돌아오는 데 걸린 평균 시간입니다. "
+                "50ms 이하면 원활한 편이고, 100ms 이상이면 웹페이지 반응이나 서비스 접속이 느리게 느껴질 수 있습니다."
+            ),
         ),
         _card(
             name="끊김 정도",
             value=_format_percent(loss),
             status=_loss_status(loss),
             description="ping 패킷 손실률입니다.",
+            help_text=(
+                "통신 중 사라진 데이터 비율입니다. "
+                "0%가 가장 안정적인 상태이고, 5% 이상이면 화상회의, 게임, 영상 시청 중 끊김이나 지연이 느껴질 수 있습니다."
+            ),
         ),
         _card(
             name="무선 연결 속도",
             value=_rate_text(wifi),
             status="info",
             description="Windows에서 확인된 Wi-Fi 수신/전송 속도입니다.",
+            help_text=(
+                "노트북과 Wi-Fi 장비 사이의 연결 속도입니다. "
+                "실제 인터넷 속도와 같지는 않지만 인터넷 품질과 연관이 있습니다. "
+                "이 값이 낮으면 AP까지의 무선 구간이 병목이 되어 인터넷 체감 속도도 느려질 수 있습니다."
+            ),
         ),
         _card(
             name="채널",
             value=_channel_text(wifi),
             status="info",
             description="현재 연결된 무선 채널과 대역입니다.",
+            help_text=(
+                "Wi-Fi가 사용하는 주파수 대역과 채널입니다. "
+                "5GHz는 빠르고 쾌적한 편이지만 벽이나 거리의 영향을 더 많이 받고, "
+                "2.4GHz는 멀리까지 연결되지만 주변 기기와 간섭이 많을 수 있습니다."
+            ),
         ),
         _card(
             name="주변 eduroam 감지",
             value=nearby_text,
             status="success" if nearby.get("detected") else "warning",
             description="주변 AP 목록에서 eduroam이 감지되는지 확인합니다.",
+            help_text=(
+                "주변에서 eduroam 신호가 잡히는지 확인합니다. "
+                "BSSID는 주변에서 감지된 eduroam AP 수를 의미합니다. "
+                "0개라면 주변에 eduroam 신호가 없거나 신호가 매우 약할 수 있습니다."
+            ),
         ),
     ]
 
@@ -703,6 +770,7 @@ if __name__ == "__main__":
                 "has_valid_dns_server": True,
                 "nslookup_success": True,
                 "dns_lookup_valid": True,
+                "domain_resolution_works": True,
             },
             "internet": {
                 "ping_8_8_8_8_success": True,
